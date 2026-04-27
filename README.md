@@ -1,1 +1,109 @@
 # INDENG231-Project-ArthurF
+
+A modular daily-close backtesting simulation system for Nasdaq-100
+constituent stocks, built for INDENG 231 Course Project 1.
+
+## Overview
+
+The system is designed around three pieces:
+
+* **Data layer** ([src/data_loader.py](src/data_loader.py)) — loads a
+  wide or long CSV of daily close prices and produces a clean,
+  date-indexed price panel plus simple-return panel.
+* **Strategy layer**
+  ([src/strategies/base.py](src/strategies/base.py)) — a
+  `BaseStrategy` that maps the information available at the close of
+  day *t* (prices and returns up to and including *t*) to a target
+  weight vector. Strategies override `generate_weights`; the base
+  class enforces the no-short / no-leverage constraints in
+  `validate_weights`.
+* **Engine layer** ([src/backtester.py](src/backtester.py)) — iterates
+  trading days, calls the strategy with only the history through *t*,
+  and applies the resulting weights to the *next* day's returns. This
+  is what keeps the system free of look-ahead bias.
+
+Outputs (NAV curves, drawdown plots, metric tables, run logs) land
+under [outputs/](outputs/) so experiments are easy to compare.
+
+## Hard constraints
+
+1. Daily-close decisions and execution only.
+2. At date *t*, only data up to and including *t* is visible to the
+   strategy.
+3. Target weights chosen at *t* are realized against returns from
+   *t* to *t+1*.
+4. No short selling: weights ≥ 0.
+5. No leverage: sum of weights ≤ 1; the residual is cash.
+6. If no stock is selected, the portfolio holds 100% cash.
+
+## Setup
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+The `requirements.txt` for Phase 1 only needs:
+
+```
+pandas
+numpy
+matplotlib
+```
+
+## Data placement
+
+Place the dataset at:
+
+```
+data/nasdaq100_daily_5y.csv
+```
+
+The loader supports both layouts:
+
+* **Wide** — first column is the date, every other column is a ticker
+  with close prices.
+* **Long** — one row per `(date, ticker)` pair with a price column
+  named `close`, `adj_close`, or `price`.
+
+Tickers are read from the file; nothing is hard-coded.
+
+## Phase 1 — run command
+
+From the repository root:
+
+```bash
+python experiments/run_all.py
+```
+
+This will:
+
+1. Load the dataset.
+2. Run the `EqualWeightBuyAndHoldStrategy` smoke test over every
+   stock available in the file.
+3. Write:
+
+   * [outputs/tables/phase1_metrics.csv](outputs/tables/) — single-row
+     metrics table.
+   * [outputs/figures/phase1_nav.png](outputs/figures/) — NAV curve.
+   * [outputs/figures/phase1_drawdown.png](outputs/figures/) —
+     drawdown curve.
+   * [outputs/logs/phase1_log.json](outputs/logs/) — run summary.
+
+## Repository layout
+
+```
+src/
+  config.py            # paths and constants
+  data_loader.py       # CSV ingest + return computation
+  backtester.py        # Backtester + BacktestResult
+  metrics.py           # cumulative/annualized return, Sharpe, drawdown, …
+  plotting.py          # NAV and drawdown plots
+  strategies/
+    base.py            # BaseStrategy + EqualWeightBuyAndHoldStrategy
+experiments/
+  run_all.py           # Phase 1 entry point
+data/                  # input CSV (gitignored)
+outputs/               # generated artifacts (gitignored)
+```
