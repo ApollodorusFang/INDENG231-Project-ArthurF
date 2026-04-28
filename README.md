@@ -154,6 +154,43 @@ This produces:
   drawdown curves.
 * [outputs/logs/benchmark_log.json](outputs/logs/) — run summary.
 
+## Phase 4 — new strategies vs. benchmarks
+
+Phase 4 introduces two new portfolio strategies designed to beat the
+Phase 3 benchmark Sharpe ratios, and compares them on a held-out test
+window:
+
+* **RiskAdjustedMomentumStrategy** — top-K by `return / volatility`
+  signal, weighted inverse-vol, with an optional market-volatility
+  throttle that scales gross exposure to `defensive_exposure` when
+  realized market vol exceeds `market_vol_threshold`.
+* **LowVolatilityMomentumStrategy** — combines trailing-return rank
+  (higher is better) with low-volatility rank (lower vol is better)
+  into a transparent additive score, picks top-K, weights inverse-vol.
+
+The script does a small grid search
+(`lookback ∈ {30, 60, 90}`, `volatility_window ∈ {20, 40}`,
+`k ∈ {5, 10, 15}`) on the first 60% of dates, then evaluates the tuned
+strategies — alongside `SMACrossoverPortfolioStrategy` and
+`TopKMomentumStrategy` — on the remaining 40%.
+
+Run from the repository root:
+
+```bash
+python experiments/run_new_strategies.py
+```
+
+This produces:
+
+* [outputs/tables/benchmarks_vs_new_metrics.csv](outputs/tables/) —
+  test-window metrics, sorted by Sharpe.
+* [outputs/figures/benchmarks_vs_new_nav.png](outputs/figures/) —
+  overlaid NAV curves.
+* [outputs/figures/benchmarks_vs_new_drawdown.png](outputs/figures/) —
+  overlaid drawdown curves.
+* [outputs/logs/new_strategies_log.json](outputs/logs/) — run summary
+  including tuned parameters and the beats-benchmarks verdict.
+
 ## Repository layout
 
 ```
@@ -168,10 +205,12 @@ src/
     base.py            # BaseStrategy + EqualWeightBuyAndHoldStrategy
     single_stock.py    # Phase 2 single-stock long-or-cash strategies
     benchmarks.py      # Phase 3 portfolio benchmark strategies
+    cross_sectional.py # Phase 4 risk-adjusted / low-vol momentum
 experiments/
   run_all.py           # Phase 1 entry point
   run_single_stock.py  # Phase 2 entry point
   run_benchmarks.py    # Phase 3 entry point
+  run_new_strategies.py # Phase 4 entry point
 data/                  # input CSV (gitignored)
 outputs/               # generated artifacts (gitignored)
 ```
