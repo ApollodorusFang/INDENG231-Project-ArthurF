@@ -91,6 +91,37 @@ This will:
      drawdown curve.
    * [outputs/logs/phase1_log.json](outputs/logs/) — run summary.
 
+## Phase 2 — single-stock strategy comparison
+
+Phase 2 picks one stock (default: `NVDA`, falling back to `AAPL`, then
+the first available ticker) and runs five long-or-cash strategies on
+it through the same backtester:
+
+* **Momentum** — long if the trailing 20-day return is positive.
+* **Mean reversion** — long if the trailing 20-day return is below a
+  threshold (default −5%).
+* **MA crossover** — long if the 20-day SMA is above the 50-day SMA.
+* **Volatility-filtered momentum** — long only when momentum is
+  positive *and* trailing 20-day volatility is below 3%.
+* **Z-score mean reversion** — long when the 20-day price z-score
+  drops below −1 standard deviation.
+
+Run from the repository root:
+
+```bash
+python experiments/run_single_stock.py
+```
+
+This produces:
+
+* [outputs/tables/single_stock_metrics.csv](outputs/tables/) — one row
+  per strategy, sorted by Sharpe.
+* [outputs/figures/single_stock_nav.png](outputs/figures/) — overlaid
+  NAV curves.
+* [outputs/figures/single_stock_drawdown.png](outputs/figures/) —
+  overlaid drawdown curves.
+* [outputs/logs/single_stock_log.json](outputs/logs/) — run summary.
+
 ## Repository layout
 
 ```
@@ -102,8 +133,10 @@ src/
   plotting.py          # NAV and drawdown plots
   strategies/
     base.py            # BaseStrategy + EqualWeightBuyAndHoldStrategy
+    single_stock.py    # Phase 2 single-stock long-or-cash strategies
 experiments/
   run_all.py           # Phase 1 entry point
+  run_single_stock.py  # Phase 2 entry point
 data/                  # input CSV (gitignored)
 outputs/               # generated artifacts (gitignored)
 ```
