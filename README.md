@@ -122,6 +122,38 @@ This produces:
   overlaid drawdown curves.
 * [outputs/logs/single_stock_log.json](outputs/logs/) — run summary.
 
+## Phase 3 — portfolio benchmark strategies
+
+Phase 3 implements three cross-sectional portfolio strategies over the
+full Nasdaq-100 universe, plus the underlying portfolio-construction
+helpers in [src/portfolio.py](src/portfolio.py)
+(`equal_weight`, `inverse_volatility_weight`, `rank_weight`).
+
+* **SMA crossover (portfolio)** — for each stock, compare the 20-day
+  and 50-day SMA; equal-weight the stocks where the short SMA is above
+  the long SMA. Cash if none qualify.
+* **Top-K momentum** — rank every stock by trailing 30-day return,
+  equal-weight the top 10. (Project benchmark #2.)
+* **Risk-adjusted top-K momentum** — rank by
+  `trailing_return / rolling_volatility`, keep the top 10 with a
+  positive signal, weight them inverse-vol.
+
+Run from the repository root:
+
+```bash
+python experiments/run_benchmarks.py
+```
+
+This produces:
+
+* [outputs/tables/benchmark_metrics.csv](outputs/tables/) — one row per
+  strategy, sorted by Sharpe.
+* [outputs/figures/benchmark_nav.png](outputs/figures/) — overlaid NAV
+  curves.
+* [outputs/figures/benchmark_drawdown.png](outputs/figures/) — overlaid
+  drawdown curves.
+* [outputs/logs/benchmark_log.json](outputs/logs/) — run summary.
+
 ## Repository layout
 
 ```
@@ -131,12 +163,15 @@ src/
   backtester.py        # Backtester + BacktestResult
   metrics.py           # cumulative/annualized return, Sharpe, drawdown, …
   plotting.py          # NAV and drawdown plots
+  portfolio.py         # equal / inverse-vol / rank weighting helpers
   strategies/
     base.py            # BaseStrategy + EqualWeightBuyAndHoldStrategy
     single_stock.py    # Phase 2 single-stock long-or-cash strategies
+    benchmarks.py      # Phase 3 portfolio benchmark strategies
 experiments/
   run_all.py           # Phase 1 entry point
   run_single_stock.py  # Phase 2 entry point
+  run_benchmarks.py    # Phase 3 entry point
 data/                  # input CSV (gitignored)
 outputs/               # generated artifacts (gitignored)
 ```
