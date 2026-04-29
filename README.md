@@ -191,6 +191,53 @@ This produces:
 * [outputs/logs/new_strategies_log.json](outputs/logs/) — run summary
   including tuned parameters and the beats-benchmarks verdict.
 
+## Phase 5 — UCB meta-strategy
+
+Phase 5 wraps the four portfolio strategies from Phase 3 and Phase 4
+inside a UCB-1 multi-armed-bandit selector
+([src/strategies/bandit.py](src/strategies/bandit.py)).  Each base
+strategy is one *arm*; at every trading day the meta-strategy picks
+the arm with the highest upper-confidence-bound score
+
+```
+UCB_k = mean_reward_k + c * sqrt(log(total_trials) / n_k)
+```
+
+asks that arm for its target weights, and forwards them.  After the
+day's return is realized, the backtester calls back into the
+meta-strategy via a new optional `update_after_return` hook so that
+arm gets credited with the realized return.  Because the reward
+feedback only arrives after the return is known, the selection
+process never peeks at future data.
+
+UCB balances **exploration** (untried arms get tried first; the
+`sqrt(log T / n_k)` term keeps low-count arms competitive) and
+**exploitation** (the `mean_reward_k` term steers selections toward
+arms that have done well so far).
+
+Arms used in this experiment:
+
+1. `SMACrossoverPortfolioStrategy`
+2. `TopKMomentumStrategy`
+3. `RiskAdjustedMomentumStrategy`
+4. `LowVolatilityMomentumStrategy`
+
+Run from the repository root:
+
+```bash
+python experiments/run_ucb_strategy.py
+```
+
+This produces:
+
+* [outputs/tables/ucb_metrics.csv](outputs/tables/) — metrics for the
+  four arms plus the UCB meta-strategy, sorted by Sharpe.
+* [outputs/figures/ucb_nav.png](outputs/figures/) — NAV overlay.
+* [outputs/figures/ucb_drawdown.png](outputs/figures/) — drawdown
+  overlay.
+* [outputs/logs/ucb_log.json](outputs/logs/) — selection counts, mean
+  realized rewards per arm, and the metrics table.
+
 ## Repository layout
 
 ```
@@ -206,11 +253,13 @@ src/
     single_stock.py    # Phase 2 single-stock long-or-cash strategies
     benchmarks.py      # Phase 3 portfolio benchmark strategies
     cross_sectional.py # Phase 4 risk-adjusted / low-vol momentum
+    bandit.py          # Phase 5 UCB meta-strategy
 experiments/
   run_all.py           # Phase 1 entry point
   run_single_stock.py  # Phase 2 entry point
   run_benchmarks.py    # Phase 3 entry point
   run_new_strategies.py # Phase 4 entry point
+  run_ucb_strategy.py  # Phase 5 entry point
 data/                  # input CSV (gitignored)
 outputs/               # generated artifacts (gitignored)
 ```

@@ -119,6 +119,22 @@ class Backtester:
                 nav = nav * (1.0 + port_ret)
                 nav_series.iloc[i + 1] = nav
                 daily_ret.iloc[i + 1] = port_ret
+
+                # Optional reward-feedback hook for adaptive strategies
+                # (e.g. the UCB meta-strategy).  Called only after the
+                # next-day return is realized, so the strategy never
+                # peeks at r_{t+1} when picking w_t.
+                if hasattr(strategy, "update_after_return"):
+                    try:
+                        strategy.update_after_return(port_ret, t)
+                    except Exception as exc:  # noqa: BLE001
+                        log.append(
+                            {
+                                "date": str(t.date()),
+                                "event": "update_after_return_error",
+                                "error": repr(exc),
+                            }
+                        )
             else:
                 # On the final day there is no t+1 return to realize.
                 # The decision still incurs any transaction cost on the
