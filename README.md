@@ -238,6 +238,51 @@ This produces:
 * [outputs/logs/ucb_log.json](outputs/logs/) — selection counts, mean
   realized rewards per arm, and the metrics table.
 
+## Phase 6 — statistical and risk analysis
+
+Phase 6 adds a small, transparent risk-analysis toolbox in
+[src/risk.py](src/risk.py) and uses it to evaluate the four portfolio
+strategies plus the UCB meta-strategy:
+
+* **VaR (5%)** and **CVaR (5%)** — the empirical 5th-percentile daily
+  loss, and the average of the worst 5% of days. CVaR is the more
+  honest tail-risk metric because it averages the *whole* tail rather
+  than reading a single quantile.
+* **Sharpe 95% confidence interval** — Lo (2002)-style normal
+  approximation. Standard error
+  `SE(SR) ≈ sqrt((1 + 0.5·SR²)/N)·sqrt(252)`. Wide CIs warn that an
+  apparently large Sharpe may not be statistically meaningful.
+* **Bootstrap NAV paths** — i.i.d. resampling of realized daily
+  returns to project plausible alternative growth trajectories. Shows
+  how much of the realized track record is signal vs. ordering luck.
+* **Empirical tail-loss probability** — fraction of days with daily
+  return below `-5%`.
+* **Importance-sampling-inspired stress test** — *educational* tail
+  stress: oversample negative-return days by `stress_multiplier=3` and
+  re-estimate tail probability and CVaR. Documented as a transparent
+  what-if, **not** a rigorous IS estimator (no likelihood-ratio
+  reweighting).
+* Optional **Gaussian copula simulation** for joint return Monte-Carlo
+  with a robust covariance fallback (jittered Cholesky → eigendecomp).
+
+Run from the repository root:
+
+```bash
+python experiments/run_risk_analysis.py
+```
+
+This produces:
+
+* [outputs/tables/risk_metrics.csv](outputs/tables/) — risk metrics
+  per strategy, sorted by Sharpe.
+* [outputs/tables/sharpe_confidence_intervals.csv](outputs/tables/) —
+  Sharpe + standard error + 95% CI per strategy.
+* [outputs/figures/bootstrap_nav_paths.png](outputs/figures/) — 50
+  bootstrapped NAV paths plus the median path for the best-Sharpe
+  strategy.
+* [outputs/logs/risk_analysis_log.json](outputs/logs/) — full run
+  summary including bootstrap terminal-NAV quantiles.
+
 ## Repository layout
 
 ```
@@ -254,12 +299,14 @@ src/
     benchmarks.py      # Phase 3 portfolio benchmark strategies
     cross_sectional.py # Phase 4 risk-adjusted / low-vol momentum
     bandit.py          # Phase 5 UCB meta-strategy
+  risk.py              # Phase 6 risk + statistical utilities
 experiments/
   run_all.py           # Phase 1 entry point
   run_single_stock.py  # Phase 2 entry point
   run_benchmarks.py    # Phase 3 entry point
   run_new_strategies.py # Phase 4 entry point
   run_ucb_strategy.py  # Phase 5 entry point
+  run_risk_analysis.py # Phase 6 entry point
 data/                  # input CSV (gitignored)
 outputs/               # generated artifacts (gitignored)
 ```
