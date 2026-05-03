@@ -43,9 +43,17 @@ return, annualized volatility, Sharpe (zero risk-free rate), maximum
 drawdown, Calmar, win rate, and average L1 turnover. All
 annualizations use *T = 252*.
 
-**Outputs.** Each phase writes one CSV (`outputs/tables/`), two PNGs
-(`outputs/figures/`, NAV + drawdown overlays), and one JSON run log
-(`outputs/logs/`).
+**Outputs.** Each phase writes a fixed-schema set of artifacts.
+`outputs/tables/<phase>_metrics.csv` carries one row per strategy with
+columns `strategy, cumulative_return, annualized_return,
+annualized_volatility, sharpe_ratio, max_drawdown, calmar_ratio,
+win_rate, average_turnover`; `outputs/figures/<phase>_nav.png` and
+`<phase>_drawdown.png` are overlaid NAV and drawdown plots; and
+`outputs/logs/<phase>_log.json` contains the dataset bounds, strategy
+parameters, a verbatim copy of the metrics table, and any
+phase-specific bookkeeping (tuned grid params, bandit selection counts,
+bootstrap quantiles). Identical column names across CSVs make
+cross-phase comparison trivial.
 
 **Assumptions.** (i) Weights execute at the recorded close;
 (ii) zero risk-free rate; (iii) long-only, no leverage;
@@ -58,6 +66,64 @@ CSV (survivorship-biased).
 plotting, portfolio, risk), `src/strategies/` (base, single_stock,
 benchmarks, cross_sectional, bandit), `experiments/` (one entry
 script per deliverable), `outputs/`, and `report/`.
+
+### System Architecture and Data Flow
+
+The system separates concerns along a five-stage pipeline:
+
+$$
+\text{Data} \to \text{Signal} \to \text{Portfolio} \to \text{Execution} \to \text{Evaluation}.
+$$
+
+**Data** (`data_loader.py`) ingests close prices and emits two aligned
+panels: `prices` (*T × N*) and `returns = prices.pct_change()`, both
+indexed by the trading calendar. **Signal** lives inside each
+strategy's `generate_weights` call — the cross-sectional or
+time-series statistic used to rank or gate names (e.g. trailing-return
+rank, *ρ/σ* score, market drawdown), consuming `prices[:t]` and
+`returns[:t]` only. **Portfolio construction** maps the signal to a
+target weight vector *w<sub>t</sub>*; the helpers in `portfolio.py`
+(`equal_weight`, `inverse_volatility_weight`, `rank_weight`) take
+care of non-negativity, gross ≤ 1, and cash residual by construction.
+**Execution** is the engine itself: it calls `validate_weights`,
+charges *κ‖w<sub>t</sub> − w<sub>t−1</sub>‖<sub>1</sub>*, and realizes
+*w<sub>t</sub>* against *R<sub>i,t+1</sub>*. **Evaluation**
+(`metrics.py`, `risk.py`, `plotting.py`) consumes the resulting NAV
+/ daily-return series and produces metrics, drawdown charts, and risk
+diagnostics. The pipeline is strictly forward: evaluation cannot feed
+back into execution.
+
+### Extensibility and Strategy Integration
+
+A new strategy requires implementing one method. The engine, metrics,
+plotting, portfolio helpers, and constraint enforcement are
+untouched.
+
+```python
+class MyNewStrategy(BaseStrategy):
+    name = "my_new_strategy"
+
+    def generate_weights(self, prices_until_t, returns_until_t,
+                         current_date):
+        signal   = my_signal(prices_until_t, returns_until_t)  # (1) signal
+        selected = signal.nlargest(self.k).index                # (2) select
+        return inverse_volatility_weight(                       # (3) weight
+            selected, vol_estimate, prices_until_t.columns
+        )
+```
+
+The engine then runs `Backtester(prices).run(MyNewStrategy())` and
+writes the standard outputs without further glue. All eight
+strategies in this report — five single-stock, two new portfolio,
+plus the UCB meta-strategy — were added this way.
+
+**Acknowledged limitation.** `generate_weights` merges signal
+construction with portfolio construction in a single method. A cleaner
+factoring would split a strategy into composable `Signal` and
+`PortfolioBuilder` pieces, so a top-K momentum signal could be paired
+with either equal-weight or inverse-vol weighting without writing a
+new strategy class. The current design accepts that duplication for
+the simplicity of a one-method contract.
 
 ---
 
@@ -298,13 +364,85 @@ noise.
 ## 7. Limitations and Reproducibility
 
 **Limitations.** Daily-close fillability with no spread or slippage;
-zero default transaction cost (high-turnover strategies — UCB at 1.40,
-the new k=3 momentum at 0.17–0.24, top-K at 0.30 — would lose
-materially more alpha than the SMA portfolio at 0.07 under realistic
-costs); survivorship bias in the constituent panel; single 60/40 split
-with boundary-parameter selection in Deliverable 5; a single dominant
-macro regime (post-COVID rates → AI mega-cap rally) in the 5-year
-window; Sharpe CIs assume i.i.d. returns.
+zero default transaction cost; survivorship bias in the constituent
+panel; single 60/40 split with boundary-parameter selection in
+Deliverable 5; a single dominant macro regime (post-COVID rates → AI
+mega-cap rally) in the 5-year window; Sharpe CIs assume i.i.d.
+returns. The next two subsections take the two most material
+limitations — transaction costs and statistical robustness — in turn.
+
+### Transaction Costs and Market Frictions
+
+The default *κ = 0* keeps cross-strategy comparisons free of an
+ad-hoc cost assumption, but it is unrealistic. A plausible
+proportional cost on the close for liquid US equities is *κ ∈ [5, 15]*
+bps per side once spread, exchange fees, and small-size impact are
+accounted for. The first-order Sharpe drag is
+$\Delta\mathrm{Sharpe} \approx
+-\sqrt{T}\,\kappa\,\overline{\mathrm{TO}}/\sigma_p$, which scales
+linearly with average daily turnover *TO*.
+
+| Strategy | Avg. daily TO | Vulnerability |
+|---|---:|:---|
+| Single-stock MA crossover | 0.02 | negligible |
+| SMA crossover portfolio | 0.07–0.08 | low |
+| MomDDCtrl (k=3, ℓ=90) | 0.17 | moderate |
+| ConcentratedMomentum (k=3, ℓ=90) | 0.24 | moderate |
+| Top-K momentum (lb=30) | 0.30–0.33 | moderate |
+| Risk-adj top-K momentum | 0.44 | high |
+| UCB meta-strategy | 1.40 | severe |
+
+At *κ = 10* bps the UCB meta-strategy bleeds
+*252 · 0.0010 · 1.40 ≈ 35%* in annualized return — enough to push its
+Sharpe well below zero. Top-K momentum loses ~7.5% annualized
+(≈ 0.27 Sharpe given its 27.6% volatility). SMA crossover loses only
+~2%. The ranking compresses materially under realistic costs and the
+low-turnover trend-following arms become more competitive relative to
+the high-Sharpe momentum strategies. The engine already accepts *κ*
+as a constructor argument, so a *κ ∈ {0, 5, 10, 20}* bps sensitivity
+sweep slots in without code changes. A per-name fixed cost and a
+volume-aware slippage model are the natural next refinements (the
+latter currently blocked by the absence of a volume column in the
+dataset).
+
+### Robustness and Statistical Considerations
+
+**Parameter sensitivity.** Both Deliverable-5 winners selected
+*boundary* parameters (*k = 3* smallest, *ℓ = 90* longest). Boundary
+selections are a structural overfitting flag — the in-sample
+objective is still climbing at the edge of the grid, so the true
+optimum may lie outside what was searched. A natural diagnostic is to
+widen the grid (e.g. *k ∈ {1, 2, 3, 5, 7}*, *ℓ ∈ {60, 90, 120, 180}*)
+and verify the optimum moves interior; if it does not, the signal
+genuinely prefers the most concentrated, longest-memory configuration
+available, and the limit is the grid not the strategy.
+
+**Single 60/40 split.** One train/test cut gives one realization of
+out-of-sample performance, conditional on one test regime. The
+2024-04 → 2026-04 test window is dominated by an AI mega-cap rally —
+precisely the regime that favors concentrated long-only momentum —
+so the verdict is partly a statement about the regime, not solely
+about the strategy. Three more defensible protocols:
+
+- **Walk-forward retuning.** Re-fit every Δ months on a rolling window
+  of the last *W* years; report a sequence of out-of-sample Sharpes
+  rather than one.
+- **k-fold CV across years.** Hold out one calendar year at a time;
+  aggregate the five out-of-sample Sharpes.
+- **Block bootstrap.** Resample contiguous blocks of returns to
+  preserve volatility clustering and re-estimate Sharpe.
+
+**Sharpe estimation uncertainty.** The Sharpe ratio is an estimate,
+not a known quantity. The i.i.d.-Gaussian closed-form
+$\mathrm{SE}(\widehat{\mathrm{SR}}) \approx
+\sqrt{(1+\tfrac{1}{2}\widehat{\mathrm{SR}}^2)/N}\cdot\sqrt{T}$ gives
+≈ 0.45 at *N = 1,255* and ≈ 0.71 at *N = 502*. Two practical
+consequences: (i) Sharpe differences smaller than ≈ 0.5 on the full
+sample (or ≈ 0.7 on the test window) are statistically
+indistinguishable from noise; (ii) the i.i.d. formula is a *lower
+bound* on the true uncertainty, since volatility clustering and
+autocorrelation in daily returns inflate the variance of the Sharpe
+estimator. A Lo (2002) HAC correction is the natural next refinement.
 
 **Reproducibility.** Place the dataset at
 `data/nasdaq100_daily_5y.csv` and run from the project root:
@@ -326,3 +464,13 @@ to avoid backend autodetection.) Each script writes a CSV metrics
 table, NAV/drawdown PNGs, and a JSON log to `outputs/tables/`,
 `outputs/figures/`, `outputs/logs/`. The Deliverable-5 verdict is
 computed in `outputs/logs/new_strategies_log.json`.
+
+**Run identification and config snapshots.** Each
+`<phase>_log.json` already embeds dataset bounds, strategy parameters,
+and the metrics table, so a log file is sufficient to identify a run.
+A natural extension is to capture (i) the git commit SHA at run time,
+(ii) the random seed wherever stochastic methods are used (currently
+fixed at `42` in `src/risk.py` for the bootstrap and stress test),
+and (iii) the Python / pandas / numpy versions, all under a single
+`run_id` field. This would let a third party re-execute any historical
+experiment unambiguously, even across code revisions.
