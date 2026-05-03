@@ -1,0 +1,425 @@
+\documentclass[11pt]{article}
+
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{caption}
+\usepackage{hyperref}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  urlcolor=blue!60!black,
+  pdftitle={INDENG 231 Project 1},
+  pdfauthor={Arthur Fang}
+}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.55em}
+\renewcommand{\arraystretch}{1.1}
+\captionsetup{font=small, labelfont=bf, skip=4pt}
+\graphicspath{{../outputs/figures/}}
+
+\begin{document}
+
+\noindent\textbf{Arthur Fang} \hfill INDENG 231 Project 1 \hfill April 29, 2026
+
+\vspace{0.6em}\hrule\vspace{0.6em}
+
+% ===============================================================
+\section{Backtesting System Design}
+
+\textbf{Data layer.} \texttt{src/data\_loader.py} loads close-price data
+into a date $\times$ ticker DataFrame; both wide and long CSV layouts are
+auto-detected. Missing prices are forward-filled and tickers that remain
+entirely NaN are dropped. Daily simple returns
+$R_{i,t} = P_{i,t}/P_{i,t-1} - 1$ live in a parallel panel of identical
+shape.
+
+\textbf{Strategy contract.} \texttt{src/strategies/base.py} defines
+\texttt{BaseStrategy.generate\_weights(prices\_until\_t, returns\_until\_t,
+current\_date)}, returning a target weight Series for the current day.
+Subclasses override that single method; the engine handles everything
+else. A shared \texttt{validate\_weights} method clips negatives to zero,
+normalizes if the gross exceeds 1, and treats the residual as cash. Three
+reusable weighting helpers
+(\texttt{equal\_weight}, \texttt{inverse\_volatility\_weight},
+\texttt{rank\_weight}) live in \texttt{src/portfolio.py}.
+
+\textbf{Engine.} \texttt{src/backtester.py} iterates the trading calendar.
+At day $t$ it slices prices/returns to rows \texttt{[: t]}, asks the
+strategy for $w_t$, validates, and \emph{realizes those weights against
+$R_{i,t+1}$:}
+\[
+   R_{p,\,t+1} = \sum_i w_{i,t} R_{i,t+1} - \kappa\,\lVert w_t - w_{t-1}\rVert_1,
+   \qquad
+   \mathrm{NAV}_{t+1} = \mathrm{NAV}_t (1 + R_{p,\,t+1}).
+\]
+The strategy never sees $R_{i,t+1}$ when choosing $w_{i,t}$; this is the
+structural no-lookahead guarantee. An optional
+\texttt{update\_after\_return} hook lets adaptive strategies (the UCB
+meta-strategy in \S\ref{sec:ext}) receive realized rewards, and is fired
+\emph{after} $R_{p,t+1}$ is computed.
+
+\textbf{Metrics.} \texttt{src/metrics.py} computes cumulative return,
+annualized return, annualized volatility, Sharpe (zero risk-free rate),
+maximum drawdown, Calmar, win rate, and average L1 turnover. All
+annualizations use $T = 252$.
+
+\textbf{Outputs.} Each phase writes one CSV (\texttt{outputs/tables/}),
+two PNGs (\texttt{outputs/figures/}, NAV + drawdown overlays), and one
+JSON run log (\texttt{outputs/logs/}).
+
+\textbf{Assumptions.} (i) Weights execute at the recorded close;
+(ii) zero risk-free rate; (iii) long-only, no leverage; (iv) transaction
+cost defaults to 0 (the engine accepts a proportional $\kappa$ for
+sensitivity); (v) no corporate-action handling, prices treated as
+adjusted; (vi) static universe equal to the loaded CSV (survivorship-biased).
+
+\textbf{Module map.} \texttt{src/} (config, data\_loader, backtester,
+metrics, plotting, portfolio, risk), \texttt{src/strategies/} (base,
+single\_stock, benchmarks, cross\_sectional, bandit),
+\texttt{experiments/} (one entry script per deliverable),
+\texttt{outputs/}, and \texttt{report/}.
+
+% ===============================================================
+\section{Design Choices}
+
+\textbf{Next-day return realization, not shifted weights.}
+The strategy sees \texttt{prices[:t]} (close of $t$ inclusive) and is
+paid by $R_{i,t+1}$. The alternative --- pay $w_t$ with $R_{i,t}$ ---
+would force the strategy to choose with information through $t-1$,
+which conflates ``observe the close'' with ``trade on the close''. The
+chosen pattern matches how a real desk works: decide at the close,
+realize the move overnight to the next close.
+
+\textbf{Constraint enforcement in the base class.}
+\texttt{validate\_weights} clips negatives, normalizes if gross $>1$,
+and asserts the invariants. Pushing this into the engine means a new
+strategy author cannot accidentally short or lever, and the engine
+never has to trust the subclass.
+
+\textbf{Positive-return gate on the new momentum strategies.}
+Restricting selection to names with $\rho_{i,t} > 0$ converts top-$K$
+momentum into a long-or-cash rule for free: in a broad-market sell-off
+the entire cross-section can be negative and the strategy parks in
+cash instead of loading on the ``least bad'' names.
+
+\textbf{$K{=}3$ with inverse-volatility weighting.}
+A concentrated portfolio is dominated by idiosyncratic vol, so
+inverse-vol weighting matters more there than at $K{=}10$ where the
+spread is already diluted. The grid agreed with this intuition ---
+the inverse-vol variant won at $K{=}3$ but only marginally at $K{=}10$.
+Sitting at the boundary ($K{=}3$, $\ell{=}90$) is flagged in \S5 as
+an overfitting risk; with this sample length the in-sample optimum
+clearly wants \emph{more} concentration and \emph{longer} memory than
+the grid offers, but $K{=}1$ is no longer a portfolio strategy.
+
+\textbf{Drawdown threshold $-10\%$ on a 120-day window.}
+$-5\%$ triggers on routine intra-month volatility (too many false
+positives), $-15\%$ only fires after the worst is already past
+(too late). 120 trading days $\approx 6$ months gives a smooth
+medium-term drawdown signal that does not whipsaw on single-week
+sell-offs. The grid confirmed $-10\%$ as the in-sample winner.
+
+\textbf{60/40 split rather than walk-forward.}
+A single split is transparent and easy to audit, which is the right
+trade-off for a course project. Walk-forward retuning would reduce
+overfitting more, at the cost of an extra hyperparameter (refit
+frequency) and a much heavier compute bill --- worth doing as a
+follow-up but not the headline protocol here.
+
+% ===============================================================
+\section{Deliverable 3 -- Single-Stock Strategy Comparison}
+
+Test five long-or-cash strategies on NVDA over the full 1{,}255-day
+sample: 20-day momentum; 20-day mean reversion (long after a $-5\%$
+trailing return); 20/50 SMA crossover; volatility-filtered momentum
+(long iff trailing return $> 0$ AND 20-day vol $< 3\%$); and 20-day
+z-score mean reversion (long iff $z_t < -1$). Each strategy is a
+single-stock specialization of the generic \texttt{BaseStrategy} ---
+no engine code changes.
+
+\begin{table}[h!]
+\centering
+\caption{Single-stock (NVDA) backtest metrics, full sample.}
+\begin{tabular}{lrrrrrr}
+\toprule
+\textbf{Strategy} & \textbf{Cum.\ Ret.} & \textbf{Ann.\ Ret.} & \textbf{Ann.\ Vol.} & \textbf{Sharpe} & \textbf{Max DD} & \textbf{Turnover} \\
+\midrule
+Momentum (20)              & 3.694 & 0.364 & 0.384 & \textbf{0.997} & $-0.498$           & 0.095 \\
+Z-score mean reversion (20)& 2.022 & 0.249 & 0.262 & 0.977          & $\mathbf{-0.226}$  & 0.110 \\
+Vol-filtered momentum      & 2.131 & 0.258 & 0.272 & 0.974          & $-0.364$           & 0.076 \\
+MA crossover (20/50)       & 3.042 & 0.324 & 0.376 & 0.930          & $-0.636$           & \textbf{0.022} \\
+Mean reversion ($-5\%$)    & 1.838 & 0.233 & 0.298 & 0.851          & $-0.407$           & 0.075 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[h!]
+\centering
+\includegraphics[width=0.78\linewidth]{single_stock_nav.png}
+\caption{Single-stock NAV curves on NVDA.}
+\label{fig:nvda-nav}
+\end{figure}
+
+\begin{figure}[h!]
+\centering
+\includegraphics[width=0.78\linewidth]{single_stock_drawdown.png}
+\caption{Single-stock drawdown profiles on NVDA.}
+\label{fig:nvda-dd}
+\end{figure}
+
+\textbf{Interpretation.} The top three Sharpes (momentum 0.997,
+z-score 0.977, vol-filtered 0.974) are within 0.02 of each other --- well
+inside the noise band of a 5-year single-asset Sharpe estimate (the
+approximate standard error of an annualized Sharpe at $N{=}1255$ is
+$\approx 0.45$; see \S\ref{sec:ext}). Momentum captures the most return
+($3.7\times$) but pays a $-49.8\%$ drawdown; z-score mean reversion
+spends most of the period in cash and gives back roughly half the return
+for less than half the drawdown, which is why it tops the Calmar ranking.
+MA crossover is the lowest-turnover rule by an order of magnitude.
+
+% ===============================================================
+\section{Deliverable 4 -- Portfolio-Level Backtest}
+
+Four constructions are tested over the full 101-stock pool. Two pin the
+selection rule to the top-10 names by trailing 30-day return and vary
+\emph{only} the weighting scheme, isolating the uniform vs.\ inverse-vol
+comparison required by the rubric. The SMA crossover portfolio
+(equal-weighted) and the equal-weight buy-and-hold of the entire pool
+are included as anchors. Inverse-volatility uses a 20-day rolling daily
+std.
+
+\begin{table}[h!]
+\centering
+\caption{Portfolio-level backtest metrics, full sample.}
+\begin{tabular}{lcrrrrr}
+\toprule
+\textbf{Strategy} & \textbf{Wt.} & \textbf{Cum.\ Ret.} & \textbf{Ann.\ Vol.} & \textbf{Sharpe} & \textbf{Max DD} & \textbf{Turnover} \\
+\midrule
+Top-10 momentum (lb=30)         & Unif & 2.372 & 0.276          & \textbf{1.022} & $-0.430$           & 0.328 \\
+Risk-adj top-10 momentum        & IV   & 1.187 & \textbf{0.181} & 0.961          & $\mathbf{-0.275}$  & 0.443 \\
+SMA crossover (20/50)           & Unif & 1.964 & 0.357          & 0.752          & $-0.255$           & \textbf{0.082} \\
+Equal-weight buy-and-hold       & Unif & 0.930 & 0.207          & 0.741          & $-0.310$           & 0.014 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[h!]
+\centering
+\includegraphics[width=0.78\linewidth]{benchmark_nav.png}
+\caption{Portfolio NAV. Uniform top-10 momentum dominates on cumulative growth.}
+\label{fig:port-nav}
+\end{figure}
+
+\begin{figure}[h!]
+\centering
+\includegraphics[width=0.78\linewidth]{benchmark_drawdown.png}
+\caption{Portfolio drawdowns. Inverse-volatility weighting nearly halves the worst drawdown of top-10 momentum.}
+\label{fig:port-dd}
+\end{figure}
+
+\textbf{Interpretation.} On the same selection rule, uniform weighting
+edges inverse-vol on Sharpe (1.02 vs.\ 0.96) and decisively wins on
+cumulative return ($2.37\times$ vs.\ $1.19\times$); inverse-vol cuts
+volatility by about a third (27.6\% $\to$ 18.1\%) and the drawdown by
+roughly half ($-43\%$ $\to$ $-27\%$). The reason uniform wins on
+Sharpe in this sample is regime-specific: the highest-momentum names in
+2021--2026 are also the highest-volatility mega-cap tech names, so
+inverse-vol weighting under-allocates to exactly the winners. This is
+the empirical motivation for the Deliverable-5 strategies that
+\emph{concentrate} into the strongest momentum names rather than dilute
+them via vol scaling.
+
+% ===============================================================
+\section{Deliverable 5 -- Benchmarks vs.\ Two New Strategies}
+
+\textbf{Benchmark 1 (SMA crossover).} Equal-weight Nasdaq-100 stocks
+whose 20-day SMA exceeds the 50-day SMA; cash if none qualify.
+\texttt{SMACrossoverPortfolioStrategy(20, 50)}.
+
+\textbf{Benchmark 2 (Top-K momentum).} Equal-weight the top 10 names
+by trailing 30-day return. \texttt{TopKMomentumStrategy(30, 10)}.
+
+\textbf{New strategy 1 -- ConcentratedMomentum.} Top-$K$ by raw trailing
+$\ell$-day return, restricted to names with strictly positive trailing
+return, weighted equal- or inverse-vol (chosen by the grid). Concentrating
+into a small $K$ raises the loading on the strongest momentum signal; the
+positive-return gate parks the portfolio in cash during broad-market
+downturns. \texttt{ConcentratedMomentumStrategy(lookback, k, weighting,
+volatility\_window)}.
+
+\textbf{New strategy 2 -- MomentumWithDrawdownControl.} Same top-$K$
+positive-return selection, equal-weighted; if the equal-weight market
+index has drawn down by more than $|\text{thr}|$ over the last
+\texttt{market\_window} days, gross exposure is scaled to
+\texttt{defensive\_exposure} (residual in cash). The drawdown signal
+uses only past returns.
+\texttt{MomentumWithDrawdownControlStrategy(lookback, k,
+drawdown\_threshold, defensive\_exposure, market\_window)}.
+
+\textbf{Protocol.} Tune each new strategy on the first 60\% of dates
+(2021-04-13 $\to$ 2024-04-09) by maximizing in-sample Sharpe over a
+small grid; evaluate the tuned strategies and the two benchmarks on the
+held-out 40\% test window (2024-04-10 $\to$ 2026-04-10, 502 days).
+Grid for ConcentratedMomentum:
+\texttt{lookback}$\in\{20,30,45,60,90\}$, $k\in\{3,5,7,10,15\}$,
+\texttt{weighting}$\in$\{equal, inverse\_vol\}, \texttt{vol\_window}=20.
+Grid for MomentumWithDrawdownControl:
+\texttt{lookback}$\in\{20,30,45,60,90\}$, $k\in\{3,5,7,10\}$,
+\texttt{drawdown\_threshold}$\in\{-0.05,-0.10,-0.15\}$,
+\texttt{defensive\_exposure}=0.5, \texttt{market\_window}=120. Both grid
+winners selected $k=3$ and $\ell=90$ (Concentrated chose
+\texttt{inverse\_vol}; DD-control chose \texttt{thr}$=-0.10$).
+
+\begin{table}[h!]
+\centering
+\caption{Benchmarks vs.\ new strategies, held-out test window (2024-04-10 $\to$ 2026-04-10, 502 days).}
+\begin{tabular}{lrrrrrr}
+\toprule
+\textbf{Strategy} & \textbf{Cum.\ Ret.} & \textbf{Ann.\ Ret.} & \textbf{Ann.\ Vol.} & \textbf{Sharpe} & \textbf{Max DD} & \textbf{Turnover} \\
+\midrule
+\textbf{ConcentratedMom} ($k{=}3$, $\ell{=}90$, IV)         & 4.103 & 1.266 & 0.477 & \textbf{1.951} & $-0.397$ & 0.236 \\
+\textbf{MomDDCtrl} ($k{=}3$, $\ell{=}90$, thr=$-10\%$)      & 3.843 & 1.207 & 0.465 & \textbf{1.937} & $-0.392$ & 0.173 \\
+B2: Top-10 momentum (lb=30)                                  & 1.246 & 0.501 & 0.279 & 1.594          & $-0.288$ & 0.302 \\
+B1: SMA crossover (20/50)                                    & 0.306 & 0.143 & 0.167 & 0.884          & $\mathbf{-0.181}$ & \textbf{0.069} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[h!]
+\centering
+\includegraphics[width=0.78\linewidth]{benchmarks_vs_new_nav.png}
+\caption{Test-window NAV. Both new strategies finish well above the top-K benchmark.}
+\label{fig:new-nav}
+\end{figure}
+
+\begin{figure}[h!]
+\centering
+\includegraphics[width=0.78\linewidth]{benchmarks_vs_new_drawdown.png}
+\caption{Test-window drawdowns. The new strategies pay for upside with deeper drawdowns ($\approx -40\%$) than top-K ($-29\%$).}
+\label{fig:new-dd}
+\end{figure}
+
+\textbf{Result.} Both new strategies beat both benchmarks on Sharpe.
+ConcentratedMomentum at 1.951 and MomDDCtrl at 1.937 clear the top-K
+benchmark (1.594) by 0.34--0.36 and the SMA benchmark (0.884) by more
+than a full unit. The verdict is recorded in
+\texttt{outputs/logs/new\_strategies\_log.json::comparison\_vs\_benchmarks}
+with \texttt{beats\_both\_benchmarks: true} for both strategies.
+
+\textbf{Caveats.} Three caveats temper the read. (i) The Sharpe gain
+comes mostly from amplified \emph{return} ($\approx 2.5\times$ top-K's
+ann.\ ret.) and only partly from a worse \emph{volatility} trade
+($\approx 1.7\times$); MDD is correspondingly deeper ($-40\%$ vs.
+$-29\%$). Higher Sharpe is not lower risk. (ii) Both grid winners sit at
+the boundary of the search ($k=3$ smallest, $\ell=90$ longest), a
+structural overfitting flag --- the true optimum may lie outside the
+grid. (iii) On the test window the standard error of an annualized
+Sharpe of 1.95 with $N=502$ is
+$\sqrt{(1+\tfrac{1}{2}\widehat{\mathrm{SR}}^2)/N}\cdot\sqrt{T}\approx 0.71$,
+so the 95\% CI on the new strategies overlaps with top-K's CI; beating
+the top-K benchmark by 0.34 Sharpe is real evidence but not statistically
+overwhelming. The strategies should be re-validated under walk-forward
+retuning, realistic transaction costs, and market regimes other than the
+2024--2026 AI rally before being treated as production-ready.
+
+% ===============================================================
+\section{Extensions: UCB Meta-Strategy and Risk Diagnostics}
+\label{sec:ext}
+
+\textbf{UCB-1 over four arms.} \texttt{UCBMetaStrategy(arms, c=1.0)}
+selects each day by
+$\mathrm{UCB}_k(t) = \overline{r}_k + c\sqrt{\ln T(t)/n_k(t)}$
+across SMA crossover, top-10 momentum, risk-adjusted momentum
+($\ell{=}60$), and low-volatility momentum ($\ell{=}60$); the chosen
+arm's weights are forwarded and \texttt{update\_after\_return} credits
+that arm's reward after the realized $R_{p,t+1}$. Selection counts on
+the full sample are nearly uniform (315/315/313/311 of 1{,}254 trials)
+because the per-day reward differences are sub-basis-point and the
+exploration bonus dominates.
+
+\begin{table}[h!]
+\centering
+\caption{UCB meta-strategy and arms, full sample.}
+\begin{tabular}{lrrrrr}
+\toprule
+\textbf{Strategy} & \textbf{Cum.\ Ret.} & \textbf{Ann.\ Vol.} & \textbf{Sharpe} & \textbf{Max DD} & \textbf{Calmar} \\
+\midrule
+Top-10 momentum (lb=30)                & 2.372 & 0.276 & \textbf{1.022} & $-0.430$           & 0.642          \\
+Risk-adj momentum ($\ell{=}60$)        & 0.998 & 0.169 & 0.908          & $\mathbf{-0.200}$  & 0.747          \\
+\textbf{UCB meta} ($c{=}1$, $n{=}4$)   & 2.079 & 0.361 & 0.768          & $-0.234$           & \textbf{1.084} \\
+SMA crossover (20/50)                  & 1.964 & 0.357 & 0.752          & $-0.255$           & 0.957          \\
+Low-vol momentum ($\ell{=}60$)         & 0.399 & 0.149 & 0.528          & $-0.215$           & 0.325          \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+UCB does not improve Sharpe over the best individual arm but cuts max
+drawdown by $\sim 20$pp vs.\ top-K and posts the best Calmar in the
+table. The cost is $\sim 4\times$ higher turnover; under any realistic
+transaction cost the Sharpe gap would widen against UCB.
+
+\textbf{Tail risk and Sharpe uncertainty.} \texttt{src/risk.py} computes
+empirical 5\%-VaR / 5\%-CVaR, an i.i.d.\ bootstrap of NAV paths, and
+an approximate normal CI for the annualized Sharpe under i.i.d.-Gaussian
+returns,
+$\mathrm{SE}(\widehat{\mathrm{SR}}) \approx
+\sqrt{(1 + \tfrac{1}{2}\widehat{\mathrm{SR}}^2)/N}\cdot\sqrt{T}$.
+This is not a full Lo (2002) HAC adjustment; the intervals widen if
+returns are autocorrelated or fat-tailed. Top-10 momentum has the worst
+tail (CVaR $-3.82\%$, MDD $-43\%$); risk-adjusted momentum
+($\ell{=}60$) has the cleanest tail (CVaR $-2.51\%$, MDD $-20\%$). On
+the full sample only top-10 momentum's 95\% Sharpe CI ($[0.14, 1.90]$)
+sits strictly above zero; the other arms' CIs all include zero, so
+on this sample length differences smaller than $\sim 0.5$ Sharpe are
+statistically indistinguishable from noise.
+
+\begin{figure}[h!]
+\centering
+\includegraphics[width=0.72\linewidth]{bootstrap_nav_paths.png}
+\caption{Bootstrap NAV paths for top-10 momentum. With identical mean and variance, the 5th--95th percentile spread of terminal NAV is roughly $8\times$ ($1.18 \to 9.18$); much of any realized track record is sequence luck.}
+\label{fig:bootstrap}
+\end{figure}
+
+% ===============================================================
+\section{Limitations and Reproducibility}
+
+\textbf{Limitations.} Daily-close fillability with no spread or
+slippage; zero default transaction cost (high-turnover strategies ---
+UCB at 1.40, the new $k{=}3$ momentum at 0.17--0.24, top-K at 0.30 ---
+would lose materially more alpha than the SMA portfolio at 0.07 under
+realistic costs); survivorship bias in the constituent panel;
+single 60/40 split with boundary-parameter selection in Deliverable 5; a
+single dominant macro regime (post-COVID rates $\to$ AI mega-cap rally)
+in the 5-year window; Sharpe CIs assume i.i.d.\ returns.
+
+\textbf{Reproducibility.} Place the dataset at
+\texttt{data/nasdaq100\_daily\_5y.csv} and run from the project root:
+
+\begin{small}
+\begin{verbatim}
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+python experiments/run_all.py            # engine smoke test
+python experiments/run_single_stock.py   # D3
+python experiments/run_benchmarks.py     # D4
+python experiments/run_new_strategies.py # D5
+python experiments/run_ucb_strategy.py   # extension
+python experiments/run_risk_analysis.py  # extension
+\end{verbatim}
+\end{small}
+
+(On macOS, set \texttt{MPLBACKEND=Agg} before running plot-producing
+scripts to avoid backend autodetection.) Each script writes a CSV
+metrics table, NAV/drawdown PNGs, and a JSON log to
+\texttt{outputs/tables/}, \texttt{outputs/figures/},
+\texttt{outputs/logs/}. The Deliverable-5 verdict is computed in
+\texttt{outputs/logs/new\_strategies\_log.json}.
+
+\end{document}
